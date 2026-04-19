@@ -1,3 +1,8 @@
+*.pt
+output.err
+output.out
+hand_landmarker.task
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
