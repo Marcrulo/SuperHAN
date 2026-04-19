@@ -47,13 +47,13 @@ def _cosine_lr(optimizer, base_lr: float, min_lr: float, total_steps: int):
 def _log(step: int, losses: dict, prefix: str = ""):
     parts = [f"{prefix}step={step}"]
     parts += [f"{k}={v.item():.5f}" for k, v in losses.items() if torch.is_tensor(v)]
-    print("  ".join(parts))
+    tqdm.write("  ".join(parts))
 
 
 def _save(path: str, **state):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     torch.save(state, path)
-    print(f"Saved checkpoint → {path}")
+    tqdm.write(f"Saved checkpoint → {path}")
 
 
 def _latest_checkpoint(ckpt_dir: str, prefix: str = "epoch_") -> str | None:
@@ -197,7 +197,7 @@ def _plot_logs(save_dir: str):
         out = os.path.join(save_dir, f"loss_{stage}.png")
         plt.savefig(out, dpi=130, bbox_inches="tight", facecolor=BG)
         plt.close(fig)
-        print(f"  Saved plot → {out}")
+        tqdm.write(f"  Saved plot → {out}")
 
     # ── Combined overview PNG ───────────────────────────────────────────────
     present_stages = [s for s in stages
@@ -232,7 +232,7 @@ def _plot_logs(save_dir: str):
     out = os.path.join(save_dir, "loss_overview.png")
     plt.savefig(out, dpi=130, bbox_inches="tight", facecolor=BG)
     plt.close(fig)
-    print(f"  Saved plot → {out}")
+    tqdm.write(f"  Saved plot → {out}")
 
 
 # ── Stage 1: standalone FAN warmup ────────────────────────────────────────────
@@ -309,7 +309,7 @@ def train_fan_standalone(
         train_loss = train_total / len(train_loader)
         val_loss   = _validate_fan(fan, val_loader, heatmap_loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
-        print(f"[FAN warmup] epoch={epoch+1}/{epochs}  "
+        tqdm.write(f"[FAN warmup] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
         logger.log(epoch+1, train_loss, val_loss)
 
@@ -392,7 +392,7 @@ def train_sr_pretrain(
     best_val_loss = float('inf')
     latest = _latest_checkpoint(ckpt_dir, prefix="epoch_")
     if latest:
-        print(f"[SR pretrain] Resuming from {latest}")
+        tqdm.write(f"[SR pretrain] Resuming from {latest}")
         ckpt = torch.load(latest, map_location=device)
         generator.load_state_dict(ckpt['generator_state'])
         fan.load_state_dict(ckpt['fan_state'])
@@ -401,7 +401,7 @@ def train_sr_pretrain(
         start_epoch   = ckpt['epoch'] + 1
         global_step   = ckpt['global_step']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
-        print(f"[SR pretrain] Resumed at epoch {start_epoch}, step {global_step}")
+        tqdm.write(f"[SR pretrain] Resumed at epoch {start_epoch}, step {global_step}")
 
     logger = _CSVLogger(save_dir, stage="sr",
                         extra_cols=["pixel", "perceptual", "heatmap"])
@@ -441,7 +441,7 @@ def train_sr_pretrain(
         train_loss = train_totals["total"] / n
         val_loss   = _validate_sr(generator, fan, val_loader, loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
-        print(f"[SR pretrain] epoch={epoch+1}/{epochs}  "
+        tqdm.write(f"[SR pretrain] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
         logger.log(epoch+1, train_loss, val_loss,
                    pixel=train_totals["pixel"]/n,
@@ -550,7 +550,7 @@ def train_super_fan(
     best_val_loss = float('inf')
     latest = _latest_checkpoint(ckpt_dir, prefix="epoch_")
     if latest:
-        print(f"[Super-FAN] Resuming from {latest}")
+        tqdm.write(f"[Super-FAN] Resuming from {latest}")
         ckpt = torch.load(latest, map_location=device)
         generator.load_state_dict(ckpt['generator_state'])
         discriminator.load_state_dict(ckpt['discriminator_state'])
@@ -560,7 +560,7 @@ def train_super_fan(
         start_epoch = ckpt['epoch'] + 1
         global_step = ckpt['global_step']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
-        print(f"[Super-FAN] Resumed at epoch {start_epoch}, step {global_step}")
+        tqdm.write(f"[Super-FAN] Resumed at epoch {start_epoch}, step {global_step}")
 
     logger = _CSVLogger(save_dir, stage="superfan",
                         extra_cols=["pixel", "perceptual", "heatmap",
@@ -614,7 +614,7 @@ def train_super_fan(
         train_loss = train_totals["total"] / n
         val_loss   = _validate_sr(generator, fan, val_loader, loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
-        print(f"[Super-FAN] epoch={epoch+1}/{epochs}  "
+        tqdm.write(f"[Super-FAN] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
         logger.log(epoch+1, train_loss, val_loss,
                    pixel=train_totals["pixel"]/n,

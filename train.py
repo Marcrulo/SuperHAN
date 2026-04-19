@@ -48,11 +48,13 @@ def parse_args():
                    help="Path to pretrained SR checkpoint (for superfan stage)")
     p.add_argument("--gestures", nargs="*", default=None,
                    help="Gesture subset to use (default: all). E.g. --gestures fist like ok")
+    p.add_argument("--max_samples", type=int, default=None,
+                   help="Cap dataset size per split (useful for quick debug runs)")
     p.add_argument("--batch_size",   type=int, default=16)
     p.add_argument("--num_workers",  type=int, default=4)
-    p.add_argument("--epochs_fan",   type=int, default=1)
-    p.add_argument("--epochs_sr",    type=int, default=1)
-    p.add_argument("--epochs_gan",   type=int, default=1)
+    p.add_argument("--epochs_fan",   type=int, default=30)
+    p.add_argument("--epochs_sr",    type=int, default=60)
+    p.add_argument("--epochs_gan",   type=int, default=5)
     p.add_argument("--device",   default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--log_every",    type=int, default=50)
     return p.parse_args()
@@ -70,6 +72,7 @@ def main():
         num_workers=args.num_workers,
         simulate_real_world=(args.stage != "fan"),  # clean images for FAN warmup
         gestures=args.gestures,
+        max_samples=args.max_samples,
     )
     print(f"Train batches: {len(train_loader)}  Val batches: {len(val_loader)}")
 

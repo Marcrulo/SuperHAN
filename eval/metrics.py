@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Dict
+from tqdm import tqdm
 
 
 # ── Constants ──────────────────────────────────────────────────────────────────
@@ -253,13 +254,14 @@ def _collect_uvs(
     val_loader: DataLoader,
     device:     str,
     hm_size:    int,
+    desc:       str = "collecting",
 ) -> tuple:
     """
     Run FAN on images produced by input_fn and collect predicted + GT UVs.
     Returns (all_pred_uv, all_gt_uv, all_visibility) as numpy arrays.
     """
     all_pred, all_gt, all_vis = [], [], []
-    for batch in val_loader:
+    for batch in tqdm(val_loader, desc=f"  {desc}", unit="batch", leave=False):
         img    = input_fn(batch).to(device)
         gt_uv  = batch['uv'].numpy()
         vis    = batch['visible'].numpy()
@@ -346,35 +348,39 @@ def evaluate_all(
     fan.eval()
     fan_standalone.eval()
 
-    print("  Condition 1/4: FAN on LR images...")
+    tqdm.write("  Condition 1/4: FAN on LR images...")
     lr_upsample = lambda b: F.interpolate(
         b['lr'], size=(hm_size, hm_size), mode='bilinear', align_corners=False
     )
     pred_lr, gt_lr, vis_lr = _collect_uvs(
-        lr_upsample, fan_standalone, val_loader, device, hm_size
+        lr_upsample, fan_standalone, val_loader, device, hm_size,
+        desc="1/4 FAN on LR",
     )
 
-    print("  Condition 2/4: FAN on GT HR images...")
+    tqdm.write("  Condition 2/4: FAN on GT HR images...")
     pred_hr, gt_hr, vis_hr = _collect_uvs(
-        lambda b: b['hr'], fan_standalone, val_loader, device, hm_size
+        lambda b: b['hr'], fan_standalone, val_loader, device, hm_size,
+        desc="2/4 FAN on HR",
     )
 
-    print("  Condition 3/4: SR then FAN (sequential)...")
+    tqdm.write("  Condition 3/4: SR then FAN (sequential)...")
     def sr_image(b):
         return generator(b['lr'].to(device))
     pred_seq, gt_seq, vis_seq = _collect_uvs(
-        sr_image, fan_standalone, val_loader, device, hm_size
+        sr_image, fan_standalone, val_loader, device, hm_size,
+        desc="3/4 SR then FAN",
     )
 
-    print("  Condition 4/4: Super-FAN joint (ours)...")
+    tqdm.write("  Condition 4/4: Super-FAN joint (ours)...")
     pred_joint, gt_joint, vis_joint = _collect_uvs(
-        sr_image, fan, val_loader, device, hm_size
+        sr_image, fan, val_loader, device, hm_size,
+        desc="4/4 Super-FAN",
     )
 
     # SR image quality (same generator used in conditions 3 & 4)
-    print("  Computing SR image quality metrics...")
+    tqdm.write("  Computing SR image quality metrics...")
     total_psnr, total_ssim, n = 0.0, 0.0, 0
-    for batch in val_loader:
+    for batch in tqdm(val_loader, desc="  SR quality", unit="batch", leave=False):
         sr = generator(batch['lr'].to(device))
         hr = batch['hr'].to(device)
         total_psnr += psnr(sr, hr)

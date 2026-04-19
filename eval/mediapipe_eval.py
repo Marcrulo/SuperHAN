@@ -12,31 +12,20 @@ MediaPipe is a production-grade hand landmark detector, so comparing against
 it is a meaningful real-world baseline — unlike the FAN-on-LR/HR conditions
 which use our own architecture.
 
-Joint ordering remapping
-────────────────────────
-MediaPipe and FreiHAND use different joint orderings for their 21 keypoints.
-We must remap MediaPipe's output to FreiHAND's ordering before computing PCK
-against FreiHAND's ground truth annotations.
+Joint ordering
+──────────────
+HaGRID landmarks are annotated in MediaPipe ordering, so no remapping is
+needed between the dataset's ground truth and MediaPipe's predictions.
 
-FreiHAND ordering (constants.py):
-    0  = wrist
-    1-4  = thumb  (CMC, MCP, IP,  TIP)
-    5-8  = index  (MCP, PIP, DIP, TIP)
-    9-12 = middle (MCP, PIP, DIP, TIP)
-    13-16= ring   (MCP, PIP, DIP, TIP)
-    17-20= pinky  (MCP, PIP, DIP, TIP)
+MediaPipe / HaGRID ordering (21 joints):
+    0  = Wrist
+    1-4  = Thumb  (CMC, MCP, IP,  TIP)
+    5-8  = Index  (MCP, PIP, DIP, TIP)
+    9-12 = Middle (MCP, PIP, DIP, TIP)
+    13-16= Ring   (MCP, PIP, DIP, TIP)
+    17-20= Pinky  (MCP, PIP, DIP, TIP)
 
-MediaPipe ordering (from mediapipe/python/solutions/hands.py):
-    0  = WRIST
-    1-4  = thumb  (CMC, MCP, IP,  TIP)
-    5-8  = index  (MCP, PIP, DIP, TIP)
-    9-12 = middle (MCP, PIP, DIP, TIP)
-    13-16= ring   (MCP, PIP, DIP, TIP)
-    17-20= pinky  (MCP, PIP, DIP, TIP)
-
-MP_TO_FREIHAND[i] = j means:
-    MediaPipe joint i corresponds to FreiHAND joint j.
-    After remapping: freihand_uvs[j] = mediapipe_uvs[i]
+MP_TO_HAGRID is therefore an identity mapping.
 """
 
 import pathlib
@@ -45,6 +34,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from typing import Optional
+from tqdm import tqdm
 
 try:
     import mediapipe as mp
@@ -64,45 +54,18 @@ except ImportError:
         _Interpreter = None
 
 
-# ── Joint ordering remapping ───────────────────────────────────────────────────
+# ── Joint ordering ────────────────────────────────────────────────────────────
 
-# Maps each MediaPipe joint index → its corresponding FreiHAND joint index.
-#
-# Real FreiHAND ordering (confirmed from dataset repo and Towards Data Science):
-#   0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
-#
-# MediaPipe ordering:
-#   0=wrist, 1-4=thumb, 5-8=index, 9-12=middle, 13-16=ring, 17-20=pinky
-#
-# Both orderings are identical — the mapping is a straight identity.
-MP_TO_FREIHAND = [
-    0,   # MP  0 WRIST          → FH  0 wrist
-    1,   # MP  1 THUMB_CMC      → FH  1 thumb CMC
-    2,   # MP  2 THUMB_MCP      → FH  2 thumb MCP
-    3,   # MP  3 THUMB_IP       → FH  3 thumb IP
-    4,   # MP  4 THUMB_TIP      → FH  4 thumb TIP
-    5,   # MP  5 INDEX_MCP      → FH  5 index MCP
-    6,   # MP  6 INDEX_PIP      → FH  6 index PIP
-    7,   # MP  7 INDEX_DIP      → FH  7 index DIP
-    8,   # MP  8 INDEX_TIP      → FH  8 index TIP
-    9,   # MP  9 MIDDLE_MCP     → FH  9 middle MCP
-    10,  # MP 10 MIDDLE_PIP     → FH 10 middle PIP
-    11,  # MP 11 MIDDLE_DIP     → FH 11 middle DIP
-    12,  # MP 12 MIDDLE_TIP     → FH 12 middle TIP
-    13,  # MP 13 RING_MCP       → FH 13 ring MCP
-    14,  # MP 14 RING_PIP       → FH 14 ring PIP
-    15,  # MP 15 RING_DIP       → FH 15 ring DIP
-    16,  # MP 16 RING_TIP       → FH 16 ring TIP
-    17,  # MP 17 PINKY_MCP      → FH 17 pinky MCP
-    18,  # MP 18 PINKY_PIP      → FH 18 pinky PIP
-    19,  # MP 19 PINKY_DIP      → FH 19 pinky DIP
-    20,  # MP 20 PINKY_TIP      → FH 20 pinky TIP
-]
+# HaGRID landmarks are annotated in MediaPipe ordering, so this is an
+# identity mapping — no reordering needed between GT and MP predictions.
+MP_TO_HAGRID = list(range(21))
 
-# Build the inverse lookup for convenience (FreiHAND → MediaPipe)
-FREIHAND_TO_MP = [0] * 21
-for mp_idx, fh_idx in enumerate(MP_TO_FREIHAND):
-    FREIHAND_TO_MP[fh_idx] = mp_idx
+# Keep old name as alias so any external code that imported MP_TO_FREIHAND
+# continues to work without changes.
+MP_TO_FREIHAND = MP_TO_HAGRID
+
+# Build the inverse lookup for convenience
+FREIHAND_TO_MP = list(range(21))
 
 
 # ── MediaPipe runner ───────────────────────────────────────────────────────────
@@ -153,7 +116,7 @@ class MediaPipePredictor:
                 "Could not find hand landmark model. Searched:\n"
                 + "\n".join(f"  {c}" for c in candidates)
             )
-        print(f"  Using landmark model: {model_path}")
+        tqdm.write(f"  Using landmark model: {model_path}")
         self._model_path = model_path
         self._is_task    = model_path.endswith(".task")
 
@@ -306,8 +269,8 @@ def evaluate_mediapipe(
     hr_pred, hr_gt, hr_vis, hr_det_list = [], [], [], []
 
     generator.eval()
-    print("  Running MediaPipe on LR, SR and HR images...")
-    for batch_idx, batch in enumerate(val_loader):
+    tqdm.write("  Running MediaPipe on LR, SR and HR images...")
+    for batch in tqdm(val_loader, desc="  MediaPipe eval", unit="batch", leave=False):
         lr_img = batch['lr'].to(device)
         hr_img = batch['hr']
         gt_uv  = batch['uv'].numpy()
@@ -330,9 +293,6 @@ def evaluate_mediapipe(
         sr_vis.append(vis);      sr_det_list.append(det_sr)
         hr_pred.append(pred_hr); hr_gt.append(gt_uv)
         hr_vis.append(vis);      hr_det_list.append(det_hr)
-
-        if (batch_idx + 1) % 10 == 0:
-            print(f"    Processed {(batch_idx+1) * len(hr_img)} samples...")
 
     predictor.close()
 

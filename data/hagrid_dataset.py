@@ -121,64 +121,63 @@ def hagrid_bbox_to_pixels(
     return x_min, y_min, x_max, y_max
 
 
-def make_square_bbox(
-    x_min: float,
-    y_min: float,
-    x_max: float,
-    y_max: float,
-    padding: float = 0.2,
-) -> tuple:
+def pad_to_square(image: Image.Image) -> tuple:
     """
-    Expand a bbox with padding and make it square (keeping centre fixed).
+    Pad the shorter dimension of an image with black bars so the result is
+    square. The longer dimension is kept entirely — no pixels are discarded.
+
+    Args:
+        image: PIL image of any aspect ratio.
 
     Returns:
-        (x_min, y_min, x_max, y_max) unclamped square bbox
+        (square_pil, paste_x, paste_y)
+            square_pil: square PIL image, same size on both axes.
+            paste_x:    x pixel offset where the original image was pasted.
+            paste_y:    y pixel offset where the original image was pasted.
     """
-    w = x_max - x_min
-    h = y_max - y_min
-    pad = max(w, h) * padding
-
-    x_min -= pad
-    y_min -= pad
-    x_max += pad
-    y_max += pad
-
-    side = max(x_max - x_min, y_max - y_min)
-    cx = (x_min + x_max) / 2
-    cy = (y_min + y_max) / 2
-    x_min = cx - side / 2
-    y_min = cy - side / 2
-    x_max = cx + side / 2
-    y_max = cy + side / 2
-
-    return x_min, y_min, x_max, y_max
+    w, h = image.size
+    side = max(w, h)
+    paste_x = (side - w) // 2
+    paste_y = (side - h) // 2
+    square = Image.new("RGB", (side, side), (0, 0, 0))
+    square.paste(image, (paste_x, paste_y))
+    return square, paste_x, paste_y
 
 
-def crop_and_scale_keypoints(
+def remap_keypoints(
     uv: np.ndarray,
-    bbox: tuple,
+    crop_x_min: float,
+    crop_y_min: float,
+    paste_x: int,
+    paste_y: int,
+    square_side: int,
     target_size: int,
 ) -> np.ndarray:
     """
-    Remap 2D keypoints from the original image space into the cropped,
-    resized image space.
+    Remap keypoints from original image space into the padded-square space,
+    then scale to target_size.
+
+    Steps:
+        1. Subtract crop origin  ->  coords relative to the raw crop
+        2. Add paste offset      ->  coords in the square canvas
+        3. Scale by target_size / square_side
 
     Args:
         uv:          (21, 2) keypoints in original image pixel coords
-        bbox:        (x_min, y_min, x_max, y_max) square crop box
-        target_size: side length after resizing (e.g. HR_SIZE=128)
+        crop_x_min:  x_min of the PIL crop in original image space
+        crop_y_min:  y_min of the PIL crop in original image space
+        paste_x:     x offset where crop was pasted inside the square
+        paste_y:     y offset likewise
+        square_side: side length of the square canvas in pixels
+        target_size: desired output size (HR_SIZE)
 
     Returns:
         uv_scaled: (21, 2) keypoints in [0, target_size) space
     """
-    x_min, y_min, x_max, y_max = bbox
-    box_w = x_max - x_min
-    box_h = y_max - y_min
-
-    uv_cropped = uv - np.array([x_min, y_min])
-    scale_x = target_size / box_w
-    scale_y = target_size / box_h
-    return uv_cropped * np.array([scale_x, scale_y])
+    uv_in_crop   = uv - np.array([crop_x_min, crop_y_min])
+    uv_in_square = uv_in_crop + np.array([paste_x, paste_y])
+    scale        = target_size / square_side
+    return uv_in_square * scale
 
 
 # ── Dataset ────────────────────────────────────────────────────────────────────
@@ -206,6 +205,7 @@ class HaGRIDDataset(Dataset):
         augment: bool = True,
         simulate_real_world: bool = True,
         gestures: list = None,
+        max_samples: int = None,
     ):
         """
         Args:
@@ -216,6 +216,9 @@ class HaGRIDDataset(Dataset):
             simulate_real_world: Add blur / JPEG / colour distortion to LR images.
             gestures:           Optional list of gesture names to include.
                                 If None, all gestures found under annotations/ are used.
+            max_samples:        Cap the dataset at this many samples (useful for
+                                quick debugging runs). Applied after the train/val
+                                split, so the ratio is preserved.
         """
         super().__init__()
         self.root = root
@@ -289,9 +292,13 @@ class HaGRIDDataset(Dataset):
         else:
             self.samples = all_samples[n_train:]
 
+        if max_samples is not None:
+            self.samples = self.samples[:max_samples]
+
         print(
             f"[HaGRIDDataset] {split}: {len(self.samples)} samples "
             f"across {len(gesture_list)} gestures"
+            + (f" (capped at {max_samples})" if max_samples is not None else "")
         )
 
     def __len__(self) -> int:
@@ -311,32 +318,35 @@ class HaGRIDDataset(Dataset):
         # lm_norm: (21, 2) where column 0 is x (width) and column 1 is y (height)
         uv = lm_norm * np.array([img_w, img_h], dtype=np.float32)  # (21, 2)
 
-        # ── Determine crop bounding box ───────────────────────────────────────
-        if bbox_norm is not None:
-            # Use the provided annotation bbox as the crop centre, then square it
-            x_min_px, y_min_px, x_max_px, y_max_px = hagrid_bbox_to_pixels(
-                bbox_norm, img_w, img_h
-            )
-        else:
-            # Fall back to tight bbox from keypoints themselves
-            x_min_px, y_min_px = uv.min(axis=0)
-            x_max_px, y_max_px = uv.max(axis=0)
+        # ── Crop to keypoint extents + padding, then pad to square ──────────
+        # Use the keypoint extents as the crop region — they are guaranteed
+        # to contain the hand exactly, unlike the annotation bbox which can
+        # be loosely fitted or misaligned. A padding margin is added so the
+        # outermost keypoints are not sitting right at the crop edge.
+        # The shorter axis is then padded with black bars to form a square.
+        kp_x_min, kp_y_min = uv.min(axis=0)
+        kp_x_max, kp_y_max = uv.max(axis=0)
 
-        bbox_square = make_square_bbox(x_min_px, y_min_px, x_max_px, y_max_px)
+        kp_w = kp_x_max - kp_x_min
+        kp_h = kp_y_max - kp_y_min
+        margin = max(kp_w, kp_h) * 0.2   # 20% of the hand extent
 
-        # Clamp for PIL crop (cannot read outside image)
-        x_min_c = max(0,         int(bbox_square[0]))
-        y_min_c = max(0,         int(bbox_square[1]))
-        x_max_c = min(img_w - 1, int(bbox_square[2]))
-        y_max_c = min(img_h - 1, int(bbox_square[3]))
+        x_min_c = max(0,         int(kp_x_min - margin))
+        y_min_c = max(0,         int(kp_y_min - margin))
+        x_max_c = min(img_w - 1, int(kp_x_max + margin))
+        y_max_c = min(img_h - 1, int(kp_y_max + margin))
 
         if x_max_c <= x_min_c or y_max_c <= y_min_c:
             return self.__getitem__((idx + 1) % len(self))
 
-        image_crop = image.crop((x_min_c, y_min_c, x_max_c, y_max_c))
+        raw_crop = image.crop((x_min_c, y_min_c, x_max_c, y_max_c))
+        image_crop, paste_x, paste_y = pad_to_square(raw_crop)
+        square_side = image_crop.size[0]
 
-        # ── Remap keypoints using the unclamped square bbox ───────────────────
-        uv_scaled = crop_and_scale_keypoints(uv, bbox_square, HR_SIZE)
+        # ── Remap keypoints into the padded-square space ──────────────────────
+        uv_scaled = remap_keypoints(
+            uv, x_min_c, y_min_c, paste_x, paste_y, square_side, HR_SIZE
+        )
 
         visibility = (
             (uv_scaled[:, 0] >= 0) & (uv_scaled[:, 0] < HR_SIZE) &
@@ -430,6 +440,7 @@ def build_dataloaders(
     num_workers: int = 4,
     simulate_real_world: bool = True,
     gestures: list = None,
+    max_samples: int = None,
 ) -> tuple:
     """
     Convenience function to build train and val DataLoaders.
@@ -440,6 +451,9 @@ def build_dataloaders(
         num_workers:         DataLoader worker processes.
         simulate_real_world: Pass-through to HaGRIDDataset.
         gestures:            Optional list of gesture names to include.
+        max_samples:         Cap each split at this many samples. The val cap
+                             is scaled by (1 - train_frac) / train_frac so the
+                             train/val ratio stays consistent.
 
     Returns:
         (train_loader, val_loader)
@@ -448,11 +462,13 @@ def build_dataloaders(
         root, split="train", augment=True,
         simulate_real_world=simulate_real_world,
         gestures=gestures,
+        max_samples=max_samples,
     )
     val_ds = HaGRIDDataset(
         root, split="val", augment=False,
         simulate_real_world=False,
         gestures=gestures,
+        max_samples=max_samples // 9 if max_samples is not None else None,
     )
 
     train_loader = DataLoader(
@@ -469,58 +485,115 @@ def build_dataloaders(
 
 # ── Quick sanity-check ─────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    import sys
-    import matplotlib.pyplot as plt
+def sanity_check(root: str, n: int = 8, out: str = "dataset_sanity_check.png",
+                 gestures: list = None):
+    """
+    Save a grid of n samples showing LR | HR | HR+skeleton for each.
+    Useful to verify crop, padding, and keypoint alignment before training.
 
-    root = sys.argv[1] if len(sys.argv) > 1 else "./hagrid"
+    Args:
+        root:     Path to hagrid/ root directory.
+        n:        Number of samples to visualise (default 8).
+        out:      Output PNG path.
+        gestures: Optional gesture filter passed to HaGRIDDataset.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib
+    matplotlib.use("Agg")
+
+    FINGER_COLOURS = {
+        "thumb":  "#CE93D8",
+        "index":  "#4FC3F7",
+        "middle": "#81C784",
+        "ring":   "#FFB74D",
+        "pinky":  "#F06292",
+    }
+    BONE_COLOURS = (
+        [FINGER_COLOURS["thumb"]]  * 4 +
+        [FINGER_COLOURS["index"]]  * 4 +
+        [FINGER_COLOURS["middle"]] * 4 +
+        [FINGER_COLOURS["ring"]]   * 4 +
+        [FINGER_COLOURS["pinky"]]  * 4
+    )
+
+    def _t(tensor):
+        return ((tensor.permute(1, 2, 0).numpy() + 1) / 2).clip(0, 1)
+
+    def _draw(ax, uv, vis):
+        for bone_idx, (p, c) in enumerate(HAND_BONES):
+            if vis[p] and vis[c]:
+                col = BONE_COLOURS[bone_idx] if bone_idx < len(BONE_COLOURS) else "w"
+                ax.plot([uv[p, 0], uv[c, 0]], [uv[p, 1], uv[c, 1]],
+                        color=col, linewidth=1.5)
+        ax.scatter(uv[vis, 0], uv[vis, 1], c="white", s=12,
+                   zorder=5, edgecolors="black", linewidths=0.4)
 
     ds = HaGRIDDataset(root, split="train", augment=False,
-                       simulate_real_world=False)
-    print(f"Dataset size: {len(ds)}")
+                       simulate_real_world=False, gestures=gestures,
+                       max_samples=n)
 
-    sample = ds[0]
-    print("lr shape:      ", sample["lr"].shape)
-    print("hr shape:      ", sample["hr"].shape)
-    print("heatmaps shape:", sample["heatmaps"].shape)
-    print("uv shape:      ", sample["uv"].shape)
-    print("visible:       ", sample["visible"].sum().item(), "/ 21 keypoints")
+    actual_n = min(n, len(ds))
+    ncols = 3   # LR | HR | HR + skeleton
+    fig, axes = plt.subplots(actual_n, ncols,
+                             figsize=(ncols * 3, actual_n * 3))
+    fig.patch.set_facecolor("#111111")
 
-    JOINT_NAMES = [
-        "Wrist",
-        "Thumb-CMC", "Thumb-MCP", "Thumb-IP",  "Thumb-TIP",
-        "Index-MCP", "Index-PIP", "Index-DIP",  "Index-TIP",
-        "Mid-MCP",   "Mid-PIP",   "Mid-DIP",    "Mid-TIP",
-        "Ring-MCP",  "Ring-PIP",  "Ring-DIP",   "Ring-TIP",
-        "Pinky-MCP", "Pinky-PIP", "Pinky-DIP",  "Pinky-TIP",
-    ]
-    vis_np = sample["visible"].numpy()
-    uv_np  = sample["uv"].numpy()
-    print("\nPer-joint visibility:")
-    for i, (name, v) in enumerate(zip(JOINT_NAMES, vis_np)):
-        coord  = f"({uv_np[i,0]:.1f}, {uv_np[i,1]:.1f})"
-        status = "OK" if v else "OUTSIDE"
-        print(f"  {i:2d}  {name:<12s}  {coord:<16s}  {status}")
+    if actual_n == 1:
+        axes = axes[np.newaxis, :]
 
-    hr_np  = ((sample["hr"].permute(1, 2, 0).numpy() + 1) / 2).clip(0, 1)
-    lr_np  = ((sample["lr"].permute(1, 2, 0).numpy() + 1) / 2).clip(0, 1)
-    hm_sum = sample["heatmaps"].sum(0).numpy()
+    col_titles = [f"LR ({LR_SIZE}×{LR_SIZE})",
+                  f"HR ({HR_SIZE}×{HR_SIZE})",
+                  "HR + skeleton"]
+    for col, title in enumerate(col_titles):
+        axes[0, col].set_title(title, color="#cccccc", fontsize=9, pad=4)
 
-    fig, axes = plt.subplots(1, 3, figsize=(10, 4))
-    axes[0].imshow(lr_np);  axes[0].set_title(f"LR input ({LR_SIZE}×{LR_SIZE})")
-    axes[1].imshow(hr_np);  axes[1].set_title(f"HR target ({HR_SIZE}×{HR_SIZE})")
-    axes[2].imshow(hr_np)
-    axes[2].imshow(hm_sum, alpha=0.5, cmap="hot")
-    axes[2].set_title("HR + GT heatmaps")
+    for row in range(actual_n):
+        sample = ds[row]
+        lr_np  = _t(sample["lr"])
+        hr_np  = _t(sample["hr"])
+        uv     = sample["uv"].numpy()
+        vis    = sample["visible"].numpy()
 
-    uv  = sample["uv"].numpy()
-    vis = sample["visible"].numpy()
-    for (p, c) in HAND_BONES:
-        if vis[p] and vis[c]:
-            axes[2].plot([uv[p, 0], uv[c, 0]], [uv[p, 1], uv[c, 1]],
-                         "c-", linewidth=1)
-    axes[2].scatter(uv[vis, 0], uv[vis, 1], c="lime", s=10, zorder=5)
+        axes[row, 0].imshow(lr_np)
+        axes[row, 1].imshow(hr_np)
+        # Upsample heatmap from HEATMAP_SIZE to HR_SIZE before overlaying
+        hm_sum = sample["heatmaps"].sum(0).numpy()
+        hm_up  = np.array(Image.fromarray(hm_sum).resize(
+            (HR_SIZE, HR_SIZE), Image.BILINEAR))
+        axes[row, 2].imshow(hr_np)
+        axes[row, 2].imshow(hm_up, alpha=0.4, cmap="hot")
+        _draw(axes[row, 2], uv, vis)
 
-    plt.tight_layout()
-    plt.savefig("dataset_sanity_check.png", dpi=150)
-    print("Saved dataset_sanity_check.png")
+        visible_count = vis.sum()
+        axes[row, 0].set_ylabel(f"{visible_count}/21 kp",
+                                color="#aaaaaa", fontsize=7)
+
+        for col in range(ncols):
+            axes[row, col].set_xticks([])
+            axes[row, col].set_yticks([])
+            axes[row, col].set_facecolor("#111111")
+            for spine in axes[row, col].spines.values():
+                spine.set_edgecolor("#333333")
+
+    plt.tight_layout(pad=0.5)
+    plt.savefig(out, dpi=150, bbox_inches="tight",
+                facecolor=fig.get_facecolor())
+    plt.close(fig)
+    print(f"Saved {actual_n}-sample sanity check → {out}")
+
+
+if __name__ == "__main__":
+    import sys
+    import argparse
+
+    parser = argparse.ArgumentParser(description="HaGRID dataset sanity check")
+    parser.add_argument("root", help="Path to hagrid/ root directory")
+    parser.add_argument("--n",        type=int,   default=8,
+                        help="Number of samples to visualise (default: 8)")
+    parser.add_argument("--out",      default="dataset_sanity_check.png",
+                        help="Output PNG path")
+    parser.add_argument("--gestures", nargs="*",  default=None,
+                        help="Gesture filter, e.g. --gestures fist like")
+    args = parser.parse_args()
+
+    sanity_check(args.root, n=args.n, out=args.out, gestures=args.gestures)

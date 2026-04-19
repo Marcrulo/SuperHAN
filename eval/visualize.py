@@ -358,7 +358,7 @@ if __name__ == "__main__":
     import sys
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-    from data.freihand_dataset import build_dataloaders
+    from data.hagrid_dataset import build_dataloaders
     from models.generator      import SRGenerator
     from models.hourglass      import StackedHourglass
     from eval.metrics          import evaluate_all, print_results, PCK_THRESHOLDS
@@ -366,7 +366,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--data",       required=True,
-                        help="FreiHAND root dir")
+                        help="HaGRID root dir")
     parser.add_argument("--ckpt",       required=True,
                         help="Super-FAN checkpoint (super_fan_epochN.pt)")
     parser.add_argument("--fan_ckpt",   required=True,
@@ -375,6 +375,10 @@ if __name__ == "__main__":
     parser.add_argument("--n_samples",  type=int, default=16,
                         help="Samples to visualise")
     parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--gestures",   nargs="*", default=None,
+                        help="Gesture subset to evaluate (default: all)")
+    parser.add_argument("--max_samples", type=int, default=None,
+                        help="Cap val set size (useful for quick debug runs)")
     parser.add_argument("--out",        default="eval_output",
                         help="Output directory for saved figures")
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available()
@@ -407,7 +411,9 @@ if __name__ == "__main__":
     # ── Data ──────────────────────────────────────────────────────────────────
     _, val_loader = build_dataloaders(
         args.data, batch_size=args.batch_size,
-        simulate_real_world=False
+        simulate_real_world=False,
+        gestures=args.gestures,
+        max_samples=args.max_samples,
     )
 
     # ── Quantitative evaluation: all 4 conditions ─────────────────────────────
