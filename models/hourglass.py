@@ -236,7 +236,7 @@ class StackedHourglass(nn.Module):
                       The LAST element is the final prediction.
                       (H//8 because stem does 3× stride-2 downsampling)
         """
-        features = self.stem(x)   # (B, channels, H//4, W//4)
+        features = self.stem(x)   # (B, channels, H//8, W//8)
         all_heatmaps = []
 
         for i in range(self.num_stacks):

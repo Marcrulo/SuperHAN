@@ -38,8 +38,8 @@ def parse_args():
     p.add_argument("--stage",    required=True,
                    choices=["fan", "sr", "superfan"],
                    help="Training stage to run")
-    p.add_argument("--data",     required=True,
-                   help="Path to HaGRID root directory")
+    p.add_argument("--data",     default=None,
+                   help="Path to HaGRID root directory (required unless --dry_run)")
     p.add_argument("--save_dir", default="checkpoints",
                    help="Directory for saving checkpoints")
     p.add_argument("--fan_ckpt", default=None,
@@ -57,7 +57,12 @@ def parse_args():
     p.add_argument("--epochs_gan",   type=int, default=5)
     p.add_argument("--device",   default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--log_every",    type=int, default=50)
-    return p.parse_args()
+    p.add_argument("--dry_run", action="store_true",
+                   help="Skip real data; run 2 synthetic batches per stage to verify shapes/losses")
+    args = p.parse_args()
+    if not args.dry_run and not args.data:
+        p.error("--data is required unless --dry_run is set")
+    return args
 
 
 def main():
@@ -66,15 +71,19 @@ def main():
     print(f"Device: {device}")
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    train_loader, val_loader = build_dataloaders(
-        root=args.data,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        simulate_real_world=(args.stage != "fan"),  # clean images for FAN warmup
-        gestures=args.gestures,
-        max_samples=args.max_samples,
-    )
-    print(f"Train batches: {len(train_loader)}  Val batches: {len(val_loader)}")
+    if args.dry_run:
+        print("[dry_run] Skipping dataset load — using synthetic tensors")
+        train_loader, val_loader = None, None
+    else:
+        train_loader, val_loader = build_dataloaders(
+            root=args.data,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            simulate_real_world=(args.stage != "fan"),  # clean images for FAN warmup
+            gestures=args.gestures,
+            max_samples=args.max_samples,
+        )
+        print(f"Train batches: {len(train_loader)}  Val batches: {len(val_loader)}")
 
     # ── Models ─────────────────────────────────────────────────────────────────
     generator     = SRGenerator()
@@ -103,12 +112,14 @@ def main():
             device=device,
             save_dir=args.save_dir,
             log_every=args.log_every,
+            dry_run=args.dry_run,
         )
 
     elif args.stage == "sr":
         print("\n=== Stage 2a: SR pre-training (pixel + perceptual + heatmap) ===")
-        assert args.fan_ckpt, "Must provide --fan_ckpt for sr stage"
-        _load_fan(args.fan_ckpt)
+        if not args.dry_run:
+            assert args.fan_ckpt, "Must provide --fan_ckpt for sr stage"
+            _load_fan(args.fan_ckpt)
         train_sr_pretrain(
             generator=generator,
             fan=fan,
@@ -118,12 +129,14 @@ def main():
             device=device,
             save_dir=args.save_dir,
             log_every=args.log_every,
+            dry_run=args.dry_run,
         )
 
     elif args.stage == "superfan":
         print("\n=== Stage 2b: Full Super-FAN (GAN fine-tuning) ===")
-        assert args.sr_ckpt, "Must provide --sr_ckpt for superfan stage"
-        _load_sr(args.sr_ckpt)
+        if not args.dry_run:
+            assert args.sr_ckpt, "Must provide --sr_ckpt for superfan stage"
+            _load_sr(args.sr_ckpt)
         train_super_fan(
             generator=generator,
             discriminator=discriminator,
@@ -134,6 +147,7 @@ def main():
             device=device,
             save_dir=args.save_dir,
             log_every=args.log_every,
+            dry_run=args.dry_run,
         )
 
 

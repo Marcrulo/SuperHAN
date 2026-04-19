@@ -37,6 +37,16 @@ from losses.losses        import SuperFANLoss, HeatmapLoss, WGANLoss
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _make_dry_run_batch(batch_size: int = 2, device: str = "cpu") -> dict:
+    """Synthetic batch matching dataset output shapes, for --dry_run mode."""
+    return {
+        'lr':       torch.randn(batch_size, 3,  32,  32,  device=device),
+        'hr':       torch.randn(batch_size, 3,  128, 128, device=device),
+        'heatmaps': torch.randn(batch_size, 21, 16,  16,  device=device),
+        'uv':       torch.rand( batch_size, 21, 2,        device=device),
+        'visible':  torch.ones( batch_size, 21,           device=device),
+    }
+
 def _cosine_lr(optimizer, base_lr: float, min_lr: float, total_steps: int):
     """Cosine annealing from base_lr to min_lr over total_steps."""
     return optim.lr_scheduler.CosineAnnealingLR(
@@ -246,6 +256,7 @@ def train_fan_standalone(
     device:       str   = "cuda",
     save_dir:     str   = "checkpoints",
     log_every:    int   = 50,
+    dry_run:      bool  = False,
 ) -> StackedHourglass:
     """
     Train the Hand-FAN in isolation on HR images with GT heatmaps.
@@ -274,24 +285,33 @@ def train_fan_standalone(
     heatmap_loss_fn = heatmap_loss_fn.to(device)
 
     optimizer = optim.RMSprop(fan.parameters(), lr=lr)
-    total_steps = epochs * len(train_loader)
+    total_steps = 2 if dry_run else epochs * len(train_loader)
     scheduler = _cosine_lr(optimizer, lr, 1e-5, total_steps)
 
     global_step = 0
     best_val_loss = float('inf')
     logger = _CSVLogger(save_dir, stage="fan")
 
-    epoch_bar = tqdm(range(epochs), desc="[FAN warmup]", unit="epoch")
+    epoch_range = range(1) if dry_run else range(epochs)
+    epoch_bar = tqdm(epoch_range, desc="[FAN warmup]", unit="epoch")
     for epoch in epoch_bar:
         fan.train()
         train_total = 0.0
-        batch_bar = tqdm(train_loader, desc=f"  epoch {epoch+1}/{epochs}",
+        batches = [_make_dry_run_batch(device=device)] * 2 if dry_run else train_loader
+        batch_bar = tqdm(batches, desc=f"  epoch {epoch+1}/{epochs}",
                          unit="batch", leave=False)
         for batch in batch_bar:
             hr  = batch['hr'].to(device)
             gt  = batch['heatmaps'].to(device)
 
+            if dry_run:
+                tqdm.write(f"[dry_run] hr={tuple(hr.shape)}  gt_hm={tuple(gt.shape)}")
+
             pred = fan(hr)
+
+            if dry_run:
+                tqdm.write(f"[dry_run] pred[-1]={tuple(pred[-1].shape)}")
+
             loss = heatmap_loss_fn(pred, gt)
 
             optimizer.zero_grad()
@@ -306,21 +326,24 @@ def train_fan_standalone(
                 _log(global_step, {'heatmap': loss}, prefix="[FAN warmup] ")
 
         # ── Validation ────────────────────────────────────────────────────────
-        train_loss = train_total / len(train_loader)
-        val_loss   = _validate_fan(fan, val_loader, heatmap_loss_fn, device)
+        n = max(len(batches), 1)
+        train_loss = train_total / n
+        val_batches = [_make_dry_run_batch(device=device)] if dry_run else val_loader
+        val_loss   = _validate_fan(fan, val_batches, heatmap_loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
         tqdm.write(f"[FAN warmup] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
         logger.log(epoch+1, train_loss, val_loss)
 
-        if val_loss < best_val_loss:
+        if not dry_run and val_loss < best_val_loss:
             best_val_loss = val_loss
             _save(os.path.join(save_dir, "fan_standalone.pt"),
                   model_state=fan.state_dict(),
                   epoch=epoch, val_loss=val_loss)
 
     logger.close()
-    _plot_logs(save_dir)
+    if not dry_run:
+        _plot_logs(save_dir)
     return fan
 
 
@@ -350,6 +373,7 @@ def train_sr_pretrain(
     save_dir:     str   = "checkpoints",
     log_every:    int   = 50,
     hm_warmup:    int   = 5000,
+    dry_run:      bool  = False,
 ) -> tuple:
     """
     Train SR generator jointly with FAN using pixel + perceptual + heatmap
@@ -383,7 +407,7 @@ def train_sr_pretrain(
 
     params = list(generator.parameters()) + list(fan.parameters())
     optimizer = optim.RMSprop(params, lr=lr)
-    total_steps = epochs * len(train_loader)
+    total_steps = 2 if dry_run else epochs * len(train_loader)
     scheduler = _cosine_lr(optimizer, lr, 1e-5, total_steps)
 
     # ── Resume from latest per-epoch checkpoint if available ──────────────────
@@ -406,13 +430,15 @@ def train_sr_pretrain(
     logger = _CSVLogger(save_dir, stage="sr",
                         extra_cols=["pixel", "perceptual", "heatmap"])
 
-    epoch_bar = tqdm(range(start_epoch, epochs), desc="[SR pretrain]", unit="epoch")
+    epoch_range = range(1) if dry_run else range(start_epoch, epochs)
+    epoch_bar = tqdm(epoch_range, desc="[SR pretrain]", unit="epoch")
     for epoch in epoch_bar:
         generator.train(); fan.train(); loss_fn.train()
 
         train_totals = {"total": 0.0, "pixel": 0.0,
                         "perceptual": 0.0, "heatmap": 0.0}
-        batch_bar = tqdm(train_loader, desc=f"  epoch {epoch+1}/{epochs}",
+        batches = [_make_dry_run_batch(device=device)] * 2 if dry_run else train_loader
+        batch_bar = tqdm(batches, desc=f"  epoch {epoch+1}/{epochs}",
                          unit="batch", leave=False)
         for batch in batch_bar:
             lr_img = batch['lr'].to(device)
@@ -421,6 +447,11 @@ def train_sr_pretrain(
 
             sr      = generator(lr_img)
             pred_hm = fan(sr)
+
+            if dry_run:
+                tqdm.write(f"[dry_run] lr={tuple(lr_img.shape)}  sr={tuple(sr.shape)}  "
+                           f"hr={tuple(hr_img.shape)}  pred_hm[-1]={tuple(pred_hm[-1].shape)}")
+
             losses  = loss_fn(sr, hr_img, pred_hm, gt_hm)
 
             optimizer.zero_grad()
@@ -437,9 +468,10 @@ def train_sr_pretrain(
                 _log(global_step, losses, prefix="[SR pretrain] ")
 
         # ── Validation ────────────────────────────────────────────────────────
-        n = len(train_loader)
+        n = max(len(batches), 1)
         train_loss = train_totals["total"] / n
-        val_loss   = _validate_sr(generator, fan, val_loader, loss_fn, device)
+        val_batches = [_make_dry_run_batch(device=device)] if dry_run else val_loader
+        val_loss   = _validate_sr(generator, fan, val_batches, loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
         tqdm.write(f"[SR pretrain] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
@@ -448,19 +480,9 @@ def train_sr_pretrain(
                    perceptual=train_totals["perceptual"]/n,
                    heatmap=train_totals["heatmap"]/n)
 
-        # Per-epoch checkpoint (always)
-        _save(os.path.join(ckpt_dir, f"epoch_{epoch+1:04d}.pt"),
-              generator_state=generator.state_dict(),
-              fan_state=fan.state_dict(),
-              optimizer_state=optimizer.state_dict(),
-              scheduler_state=scheduler.state_dict(),
-              epoch=epoch, global_step=global_step,
-              best_val_loss=best_val_loss, val_loss=val_loss)
-
-        # Best checkpoint (separate file)
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            _save(os.path.join(ckpt_dir, "best.pt"),
+        if not dry_run:
+            # Per-epoch checkpoint (always)
+            _save(os.path.join(ckpt_dir, f"epoch_{epoch+1:04d}.pt"),
                   generator_state=generator.state_dict(),
                   fan_state=fan.state_dict(),
                   optimizer_state=optimizer.state_dict(),
@@ -468,8 +490,20 @@ def train_sr_pretrain(
                   epoch=epoch, global_step=global_step,
                   best_val_loss=best_val_loss, val_loss=val_loss)
 
+            # Best checkpoint (separate file)
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                _save(os.path.join(ckpt_dir, "best.pt"),
+                      generator_state=generator.state_dict(),
+                      fan_state=fan.state_dict(),
+                      optimizer_state=optimizer.state_dict(),
+                      scheduler_state=scheduler.state_dict(),
+                      epoch=epoch, global_step=global_step,
+                      best_val_loss=best_val_loss, val_loss=val_loss)
+
     logger.close()
-    _plot_logs(save_dir)
+    if not dry_run:
+        _plot_logs(save_dir)
     return generator, fan
 
 
@@ -502,6 +536,7 @@ def train_super_fan(
     save_dir:      str   = "checkpoints",
     log_every:     int   = 50,
     d_warmup_steps: int  = 100,
+    dry_run:       bool  = False,
 ) -> tuple:
     """
     Full Super-FAN joint training with GAN loss (Stage 2b).
@@ -566,13 +601,15 @@ def train_super_fan(
                         extra_cols=["pixel", "perceptual", "heatmap",
                                     "adversarial", "d_loss"])
 
-    epoch_bar = tqdm(range(start_epoch, epochs), desc="[Super-FAN]", unit="epoch")
+    epoch_range = range(1) if dry_run else range(start_epoch, epochs)
+    epoch_bar = tqdm(epoch_range, desc="[Super-FAN]", unit="epoch")
     for epoch in epoch_bar:
         generator.train(); discriminator.train(); fan.train()
 
         train_totals = {"total": 0.0, "pixel": 0.0, "perceptual": 0.0,
                         "heatmap": 0.0, "adversarial": 0.0, "d_loss": 0.0}
-        batch_bar = tqdm(train_loader, desc=f"  epoch {epoch+1}/{epochs}",
+        batches = [_make_dry_run_batch(device=device)] * 2 if dry_run else train_loader
+        batch_bar = tqdm(batches, desc=f"  epoch {epoch+1}/{epochs}",
                          unit="batch", leave=False)
         for batch in batch_bar:
             lr_img = batch['lr'].to(device)
@@ -592,6 +629,10 @@ def train_super_fan(
             pred_hm     = fan(sr)
             fake_scores = discriminator(sr) if global_step >= d_warmup_steps else None
 
+            if dry_run:
+                tqdm.write(f"[dry_run] lr={tuple(lr_img.shape)}  sr={tuple(sr.shape)}  "
+                           f"disc_out={tuple(discriminator(sr.detach()).shape)}")
+
             losses = loss_fn(sr, hr_img, pred_hm, gt_hm, fake_scores)
             g_optimizer.zero_grad()
             losses['total'].backward()
@@ -610,9 +651,10 @@ def train_super_fan(
                      prefix="[Super-FAN] ")
 
         # ── Validation ────────────────────────────────────────────────────────
-        n = len(train_loader)
+        n = max(len(batches), 1)
         train_loss = train_totals["total"] / n
-        val_loss   = _validate_sr(generator, fan, val_loader, loss_fn, device)
+        val_batches = [_make_dry_run_batch(device=device)] if dry_run else val_loader
+        val_loss   = _validate_sr(generator, fan, val_batches, loss_fn, device)
         epoch_bar.set_postfix(train=f"{train_loss:.5f}", val=f"{val_loss:.5f}")
         tqdm.write(f"[Super-FAN] epoch={epoch+1}/{epochs}  "
               f"train_loss={train_loss:.5f}  val_loss={val_loss:.5f}")
@@ -623,27 +665,29 @@ def train_super_fan(
                    adversarial=train_totals["adversarial"]/n,
                    d_loss=train_totals["d_loss"]/n)
 
-        # Per-epoch checkpoint
-        _save(os.path.join(ckpt_dir, f"epoch_{epoch+1:04d}.pt"),
-              generator_state=generator.state_dict(),
-              discriminator_state=discriminator.state_dict(),
-              fan_state=fan.state_dict(),
-              g_optimizer_state=g_optimizer.state_dict(),
-              d_optimizer_state=d_optimizer.state_dict(),
-              epoch=epoch, global_step=global_step,
-              best_val_loss=best_val_loss, val_loss=val_loss)
-
-        # Best checkpoint
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            _save(os.path.join(ckpt_dir, "best.pt"),
+        if not dry_run:
+            # Per-epoch checkpoint
+            _save(os.path.join(ckpt_dir, f"epoch_{epoch+1:04d}.pt"),
                   generator_state=generator.state_dict(),
                   discriminator_state=discriminator.state_dict(),
                   fan_state=fan.state_dict(),
                   g_optimizer_state=g_optimizer.state_dict(),
                   d_optimizer_state=d_optimizer.state_dict(),
-                  epoch=epoch, global_step=global_step, val_loss=val_loss)
+                  epoch=epoch, global_step=global_step,
+                  best_val_loss=best_val_loss, val_loss=val_loss)
+
+            # Best checkpoint
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                _save(os.path.join(ckpt_dir, "best.pt"),
+                      generator_state=generator.state_dict(),
+                      discriminator_state=discriminator.state_dict(),
+                      fan_state=fan.state_dict(),
+                      g_optimizer_state=g_optimizer.state_dict(),
+                      d_optimizer_state=d_optimizer.state_dict(),
+                      epoch=epoch, global_step=global_step, val_loss=val_loss)
 
     logger.close()
-    _plot_logs(save_dir)
+    if not dry_run:
+        _plot_logs(save_dir)
     return generator, discriminator, fan
