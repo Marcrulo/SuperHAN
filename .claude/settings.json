@@ -8,7 +8,8 @@
       "Bash(.venv/bin/python3 -m data.hagrid_dataset ../hagrid --n 16 --gestures fist like --out sanity.png)",
       "Bash(.venv/bin/python3 train.py --stage fan --data ../hagrid --save_dir checkpoints --epochs_fan 3 --max_samples 300 --batch_size 8)",
       "Bash(.venv/bin/python3 train.py --stage sr --data ../hagrid --save_dir checkpoints --epochs_sr 3 --max_samples 300 --batch_size 8 --fan_ckpt checkpoints/fan_standalone.pt)",
-      "Bash(.venv/bin/python3 train.py --stage superfan --data ../hagrid --save_dir checkpoints --epochs_gan 2 --max_samples 300 --batch_size 8 --sr_ckpt checkpoints/sr/best.pt)"
+      "Bash(.venv/bin/python3 train.py --stage superfan --data ../hagrid --save_dir checkpoints --epochs_gan 2 --max_samples 300 --batch_size 8 --sr_ckpt checkpoints/sr/best.pt)",
+      "Bash(.venv/bin/python3 -m eval.visualize --data ../hagrid --ckpt checkpoints/superfan/best.pt --fan_ckpt checkpoints/fan_standalone.pt --out eval_output/ --max_samples 50 --no-mediapipe)"
     ]
   }
 }

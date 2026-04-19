@@ -4,7 +4,7 @@ visualize.py
 Visual evaluation for Super-FAN hands.
 
 Produces a grid of side-by-side comparisons:
-    LR input (16x16) | SR output (64x64) | HR ground truth (64x64)
+    LR input (32x32) | SR output (128x128) | HR ground truth (128x128)
 
 With skeleton overlaid on both SR and HR panels using predicted and GT
 keypoints respectively, so misalignments are immediately visible.
@@ -457,4 +457,4 @@ if __name__ == "__main__":
     )
     if mp_predictor is not None:
         mp_predictor.close()
-    print(f"\nAll outputs saved to {args.out}/")
+    print(f"\nAll outputs saved to {args.out.rstrip('/')}/")
