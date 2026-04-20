@@ -89,18 +89,8 @@ class _CSVLogger:
         self.stage = stage
         self.cols  = ["timestamp", "stage", "epoch",
                       "train_loss", "val_loss"] + (extra_cols or [])
-        # Remove any existing rows for this stage so reruns don't stack
-        if os.path.exists(self.path):
-            with open(self.path, "r", newline="") as f:
-                rows = list(csv.DictReader(f))
-            rows = [r for r in rows if r.get("stage") != self.stage]
-            with open(self.path, "w", newline="") as f:
-                if rows:
-                    writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-                    writer.writeheader()
-                    writer.writerows(rows)
-                # else: file becomes empty — header written below
-        write_header = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
+        # Write header only if file is new
+        write_header = not os.path.exists(self.path)
         self._f = open(self.path, "a", newline="")
         self._w = csv.DictWriter(self._f, fieldnames=self.cols,
                                  extrasaction="ignore")
