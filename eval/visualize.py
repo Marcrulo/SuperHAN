@@ -337,7 +337,7 @@ def plot_pck_curve(
     for spine in ax.spines.values():
         spine.set_edgecolor("#444444")
     ax.legend(facecolor="#2a2a2a", labelcolor="white", fontsize=9,
-              loc="upper left")
+              loc="lower right")
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 100)
     ax.grid(True, color="#333333", linewidth=0.5)
