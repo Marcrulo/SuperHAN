@@ -54,7 +54,8 @@ def parse_args():
     p.add_argument("--num_workers",  type=int, default=4)
     p.add_argument("--epochs_fan",   type=int, default=30)
     p.add_argument("--epochs_sr",    type=int, default=60)
-    p.add_argument("--epochs_gan",   type=int, default=5)
+    p.add_argument("--epochs_gan",   type=int,   default=5)
+    p.add_argument("--lr_gan",       type=float, default=1e-4)
     p.add_argument("--device",   default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--log_every",    type=int, default=50)
     p.add_argument("--dry_run", action="store_true",
@@ -144,6 +145,7 @@ def main():
             train_loader=train_loader,
             val_loader=val_loader,
             epochs=args.epochs_gan,
+            lr=args.lr_gan,
             device=device,
             save_dir=args.save_dir,
             log_every=args.log_every,

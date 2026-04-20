@@ -89,8 +89,18 @@ class _CSVLogger:
         self.stage = stage
         self.cols  = ["timestamp", "stage", "epoch",
                       "train_loss", "val_loss"] + (extra_cols or [])
-        # Write header only if file is new
-        write_header = not os.path.exists(self.path)
+        # Remove any existing rows for this stage so reruns don't stack
+        if os.path.exists(self.path):
+            with open(self.path, "r", newline="") as f:
+                rows = list(csv.DictReader(f))
+            rows = [r for r in rows if r.get("stage") != self.stage]
+            with open(self.path, "w", newline="") as f:
+                if rows:
+                    writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(rows)
+                # else: file becomes empty — header written below
+        write_header = not os.path.exists(self.path) or os.path.getsize(self.path) == 0
         self._f = open(self.path, "a", newline="")
         self._w = csv.DictWriter(self._f, fieldnames=self.cols,
                                  extrasaction="ignore")
@@ -531,7 +541,7 @@ def train_super_fan(
     train_loader:  DataLoader,
     val_loader:    DataLoader,
     epochs:        int   = 5,
-    lr:            float = 2.5e-4,
+    lr:            float = 1e-4,
     device:        str   = "cuda",
     save_dir:      str   = "checkpoints",
     log_every:     int   = 50,
@@ -616,12 +626,13 @@ def train_super_fan(
             hr_img = batch['hr'].to(device)
             gt_hm  = batch['heatmaps'].to(device)
 
-            # ── Discriminator update ──────────────────────────────────────────
-            sr = generator(lr_img).detach()
-            d_loss = wgan_fn.full_discriminator_loss(discriminator, hr_img, sr)
-            d_optimizer.zero_grad()
-            d_loss.backward()
-            d_optimizer.step()
+            # ── Discriminator update (5 steps per generator step) ────────────
+            for _ in range(5):
+                sr = generator(lr_img).detach()
+                d_loss = wgan_fn.full_discriminator_loss(discriminator, hr_img, sr)
+                d_optimizer.zero_grad()
+                d_loss.backward()
+                d_optimizer.step()
 
             # ── Generator + FAN update ────────────────────────────────────────
             # Skip adversarial gradients until discriminator is warmed up
