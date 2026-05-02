@@ -40,7 +40,7 @@ source .venv/bin/activate
 
 # python train.py --stage fan      --data /work3/s204122/hagrid  --save_dir checkpoints
 # python train.py --stage sr       --data /work3/s204122/hagrid  --fan_ckpt checkpoints/fan_standalone.pt
-# python train.py --stage superfan --data /work3/s204122/hagrid  --sr_ckpt  checkpoints/sr/best.pt
+python train.py --stage superfan --data /work3/s204122/hagrid  --sr_ckpt  checkpoints/sr/best.pt
 
 python -m eval.visualize \
     --data /work3/s204122/hagrid \
